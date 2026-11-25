@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.buildenv/
+build/
+dist/
+wheels/
+packaging/*.exe
+lablive_shell.bat
+lablive_gui.bat
+runs/
+profiles/
+logs/
