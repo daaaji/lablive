@@ -154,6 +154,98 @@ led-iv --unknown --ceiling 0.05 --p-max 0.3        상한을 올려 다시 (보�
 - led-iv 추가 (정전류 스윕 기본, 1936-R 필터 없이 읽어 kHz 발진을 표준편차로 검출)
 - led-check 추가 (1936reset.py 대체)
 
+## 장비 명령 (RS-232)
+
+lablive가 실제로 보내는 명령만 정리했다. 확인한 장비: 1936-R 펌웨어 v1.2.4, 2400 펌웨어 C34.
+
+### 통신 규칙
+
+| | Newport 1936-R | Keithley 2400 |
+|---|---|---|
+| 포트 설정 | 38400 8N1 (고정) | 9600 8N1, 흐름제어 없음 (앞면 메뉴 COMMUNICATION → RS-232) |
+| 명령 끝 / 응답 끝 | CR / CRLF | CR / CR |
+| 시작할 때 | `ECHO 0` (에코가 켜져 있으면 응답 앞에 명령이 되돌아옴) | CR 한 번 + `*CLS` (입력 버퍼에 남은 깨진 문자열 정리) |
+| 설정 명령 | 그대로 보내고 다시 읽어 확인 | `명령;*OPC?` → `1`이 올 때까지 대기 (연달아 보내면 명령이 사라짐) |
+| 오류 큐 | `ERRSTR?` (비워질 때까지) | `:SYST:ERR?` (`0,"No error"`까지) |
+
+### Newport 1936-R
+
+| 명령 | 의미 | 비고 |
+|---|---|---|
+| `*IDN?` | 장비 식별 | 포트 자동 탐색 (`NEWPORT` 포함 여부) |
+| `ECHO 0` | 명령 에코 끄기 | |
+| `ERRSTR?` | 오류 문자열 하나 읽기 | |
+| `PM:MODE 0` | CW continuous | |
+| `PM:UNITs 0` | 단위 A (광전류) | 3 = W/cm² (이 연구실 평소 설정) |
+| `PM:Lambda <nm>` | 파장 | 단위가 A면 값에 영향 없음 (W 환산용) |
+| `PM:AUTO 0` / `1` | auto range 끔 / 켬 | 측정 중에는 0 (아래 `PM:P?` 참고) |
+| `PM:RANge <r>` | 전류 range, r = 0–7 | 최대 2.5 nA × 10ʳ (r7 = 25 mA), 대역 1.2 Hz · 4.8 Hz · 48 Hz · 480 Hz · 4 kHz · 43 kHz · 170 kHz · 400 kHz, 분해능 ≈ 최대/32768 |
+| `PM:FILTer <n>` | 0 없음 · 1 아날로그 · 2 디지털 · 3 둘 다 | **`PM:DIGITALFILTER`를 100으로 되돌린다 → 반드시 먼저 보낼 것** |
+| `PM:ANALOGFILTER <n>` | 아날로그 필터 | 측정은 0(끔), 평소 설정 4 |
+| `PM:DIGITALFILTER <n>` | 디지털 이동평균 점 수 (내부 10 kHz 기준) | 500 = 50 ms (20 Hz 판독의 anti-alias). 원격으로 10000까지 설정됨 |
+| `PM:P?` | 현재 값 | 과범위나 range 전환 중에는 `3.402823E+38` (FLT_MAX) → 무시하고 range를 올림 |
+| `PM:DS:ENable 0` / `1` | data store 정지 / 시작 | `extras/led_settle.py` 10 kHz 캡처 |
+| `PM:DS:CLear` | data store 비우기 | |
+| `PM:DS:BUFfer 0` | 버퍼 방식 (가득 차면 정지) | |
+| `PM:DS:INTerval <n>` | 저장 간격, 내부 샘플(0.1 ms) 단위 정수 | `PM:DS:INTerval?`도 ms가 아니라 이 정수를 돌려줌 |
+| `PM:DS:SIZE <n>` | 저장할 점 수 | |
+| `PM:DS:Count?` | 저장된 점 수 | |
+| `PM:DS:GET? a-b` | a–b번 점 덤프 | 응답에 헤더(`Responsivity: …` 등)가 붙음 → `End of Header`와 `End of Data` 사이만 데이터 |
+| `PM:MODE?` `PM:UNITs?` `PM:Lambda?` `PM:AUTO?` `PM:RANge?` `PM:FILTer?` `PM:ANALOGFILTER?` `PM:DIGITALFILTER?` `PM:DS:INTerval?` | 설정 읽기 | 측정 전에 저장해 두고 끝나면 원복. 원복 순서: FILTer → ANALOGFILTER → DIGITALFILTER |
+
+### Keithley 2400
+
+| 명령 | 의미 | 비고 |
+|---|---|---|
+| `*IDN?` | 장비 식별 | 포트 자동 탐색 (`KEITHLEY` 포함 여부) |
+| `*CLS` | 오류 큐·상태 정리 | |
+| `*OPC?` | 앞 명령 완료 시 `1` | 설정 명령 뒤에 `;*OPC?`로 붙여 보냄 |
+| `:SYST:ERR?` | 오류 하나 읽기 | -101 Invalid character = 깨진 문자열 수신 (아래 트러블슈팅 참고) |
+| `:SYST:RSEN ON` / `OFF` | 4-wire / 2-wire | |
+| `:SOUR:FUNC CURR` / `VOLT` | 정전류 / 정전압 소스 | 정전류가 기본 (전류가 상한을 넘을 수 없음) |
+| `:SOUR:CURR:MODE FIX` | 고정값 소스 | |
+| `:SOUR:CURR:RANG:AUTO OFF` | 소스 range 자동 끔 | lablive가 직접 고름 |
+| `:SOUR:CURR:RANG <A>` | 소스 range (1 µ/10 µ/100 µ/1 m/10 m/100 m/1 A) | 1 A range의 정확도는 0.27% + 900 µA → 1 mA 점검은 1 mA range로. 올릴 때 range → level, 내릴 때 level → range |
+| `:SOUR:CURR:LEV <A>` | 출력 전류 | |
+| `:SOUR:FUNC?` `:SOUR:CURR:LEV?` | 소스 상태 읽기 | LED를 켜기 직전에 다시 읽어 확인 |
+| `:SENS:FUNC:CONC OFF` / `ON` | 동시 측정 끔 / 켬 | 정전압 스윕은 V와 I를 같이 |
+| `:SENS:FUNC "VOLT"` (`,"CURR"`) | 측정 기능 | 정전류에서는 단자 전압만 측정 |
+| `:SENS:VOLT:PROT <V>` | 전압 상한 (compliance) | 정전류 모드의 안전 한계. 측정 중 변경 가능 (현재 V + 0.3 V 이상만) |
+| `:SENS:VOLT:RANG <V>` `:SENS:VOLT:NPLC <n>` | 전압 측정 range / 적분 시간 | 20 V, NPLC 1 |
+| `:SOUR:VOLT:MODE FIX` `:SOUR:VOLT:RANG` `:SOUR:VOLT:LEV <V>` | 정전압 소스 | `led-iv --mode voltage` |
+| `:SENS:CURR:PROT <A>` | 전류 상한 (정전압 모드) | ≤ i_max |
+| `:SENS:CURR:RANG:AUTO ON` `:SENS:CURR:NPLC <n>` | 전류 측정 | 정전압 모드 |
+| `:FORM:ELEM VOLT,CURR` | `:READ?` 응답을 V, I 두 값으로 | |
+| `:OUTP ON` / `OFF`, `:OUTP?` | 출력 켜기/끄기, 상태 | 끝날 때 `:OUTP?`가 0인지 확인 (안 되면 포트를 다시 열어 재시도) |
+| `:READ?` | 측정 1회 → `V,I` | 정전류 모드의 I는 측정값이 아니라 설정값 |
+| `:SENS:VOLT:PROT:TRIP?` | 정전류 모드에서 전압 상한에 걸렸는지 (1/0) | 걸리면 요청 전류를 못 흘리는 중 → FAULT, LED OFF |
+| `:SENS:CURR:PROT:TRIP?` | 정전압 모드에서 전류 상한에 걸렸는지 | |
+
+## 트러블슈팅 기록
+
+개발과 실측 중 실제로 겪은 문제와 해결 순서. 같은 증상이 다시 보이면 여기부터 확인.
+
+| 증상 | 원인 | 해결 |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'lablive'` | 실행 스크립트를 `lablive` 폴더 안에 넣고 실행 | 스크립트를 한 단계 위로 (지금은 설치형 패키지라 해당 없음) |
+| 어제 되던 COM 번호로 열리지 않음 | USB-시리얼 어댑터(PL2303, CH340)에 시리얼 번호가 없어 COM 번호가 꽂는 USB 구멍을 따라감 | 포트를 고정하지 않고 매번 `*IDN?`으로 탐색. 측정 창 `장비` → `포트 찾기`, `led-check --scan` |
+| 측정 중 `PermissionError` / 포트가 사라짐 | 노트북이 흔들려 CH340 어댑터가 순간적으로 빠짐 | 정리 단계를 서로 독립시키고, 2400 OFF는 포트를 다시 열어서라도 `:OUTP?`=0까지 재시도. 케이블 고정 |
+| range 자동 결정이 늘 r7로 감 | auto range 전환 중 `PM:P?`가 3.4E+38을 돌려줘 과범위로 읽힘 | auto range를 끄고 r7에서 한 번 읽은 뒤 필요한 range를 계산. 측정 중 과범위면 소프트웨어로 한 단계씩 올림 |
+| 10 kHz 덤프 첫 값이 0.098 근처 | `PM:DS:GET?` 응답 헤더의 Responsivity(0.098 A/W @ 275 nm) 값을 데이터로 읽음 | `End of Header`와 `End of Data` 사이만 파싱 |
+| 원복 후 `PM:DIGITALFILTER?`가 100 | 처음엔 원격 설정 상한이 100이라고 잘못 판단. 값을 바꿔 써 보니 10000까지 정상 → 실제 원인은 `PM:FILTer`가 디지털 필터 크기를 100으로 초기화 | FILTer → ANALOGFILTER → DIGITALFILTER 순서로 설정/원복 |
+| 원복 후 DS 간격이 틀어짐 | `PM:DS:INTerval?` 값을 ms로 보고 변환함 (실제로는 설정 정수) | 읽은 정수를 그대로 다시 씀 |
+| 2400 설정이 가끔 일부만 적용됨 | RS-232에 흐름제어가 없어 연달아 보낸 명령이 사라짐 | 모든 설정을 `명령;*OPC?`로 보내 `1`을 받은 뒤 다음 명령. LED를 켜기 직전 `:SOUR:FUNC?`/`:SOUR:CURR:LEV?`로 재확인 |
+| 정전압 5 V 점검에서 6.28 V, 3 mA로 읽힘 | 처음엔 명령 타이밍 문제로 판단했으나 `*OPC?` 동기화 후에도 재현 → 1 A range에서 작은 전류의 정확도/제한 문제로 추정 (확정 못 함) | 이 모듈은 정전압 구동 비권장. 정전류 + 전압 상한이 기본. 소스 range를 전류에 맞춰 선택 |
+| uvc275 50 mA에서 광출력 ±46% (1.4–1.55 kHz) | 모듈 내부 스위칭 소자의 문턱(단자 V ≈ 6.26 V). 켠 지 40–60 s 뒤 발열로 V가 내려가면 이완 발진 | 100 mA 이상으로 구동, 경고 전압 6.30 V(프로파일 `vf_guard_V`). 새 LED는 `led-iv`(필터 없는 판독의 점 내 표준편차)로 발진 구간 확인 |
+| 그 발진이 이상(anomaly)으로 안 잡힘 | 지속 발진은 '급변'이 아니라 배경 잡음으로 학습됨 | 상대 기준과 별도로 절대 기준(0.5%) 추가 |
+| 접지 루프 걱정 | 노트북 + 두 장비 공통 접지 | 실측: 250 mA에서 60/180 Hz 성분이 신호의 0.004–0.006% → USB 절연기 불필요 |
+| 끈 직후 0 A 근처 점이 피팅에 섞여 최종값이 틀어짐 | LED OFF와 표본 수집 정지 순서 | `led_on=False` → 판정 정지 → OFF 순서. 최종 상태도 정지 표시 전에 기록 |
+| SETTLED가 너무 일찍 뜸 (515 s, 실제로는 그때 +1.35%) | 짧은 데이터로 피팅한 최종값이 높게 나옴 (600 s 데이터 +0.42%, 900 s +0.29%) | 30분 실측 데이터로 판정 규칙 6가지를 재생 비교 → 'SETTLED = 예측 최종값 ±tol/2' 채택 (기본 margin 0.5) |
+| 프로파일 기준 곡선이 맞지 않음 | 기준으로 등록한 회차가 사실은 데워진 상태에서 시작한 회차 (시작 V 6.571 vs 냉간 6.612) | 시작 전압이 기준과 다르면(양방향) 기준 곡선을 쓰지 않고 자유 피팅. 기준 모델은 가장 차가운 시작 회차로 |
+| 그래프 상태 패널 한글이 □□□ | 상태 문구에 한글, 그리고 matplotlib은 'sans-serif' 같은 일반 이름 하나만 주면 글자 단위 대체 글꼴을 쓰지 않음 | 그림 안 고정 문구는 영어, 글꼴 목록을 실제 이름(DejaVu Sans, 맑은 고딕 …)으로 지정 |
+| 랩 PC에서 2400 `-101` (Invalid character) | 1936-R을 찾느라 모든 포트에 38400 baud로 `*IDN?`을 보냄 → 2400(9600)이 앞 COM 번호면 깨진 문자열이 입력 버퍼에 남아 다음 명령과 합쳐짐. 노트북은 2400이 뒤 번호라 안 드러남 | 지난번 찾은 포트를 먼저, 다른 장비가 있던 포트는 맨 뒤에 탐색. 2400을 열 때/설정 전 CR + `*CLS` |
+| 채팅에서 설치 파일(.exe)을 받을 수 없음 | 다운로드 형식 제한 | zip으로 감싸서 전달 |
+
 ## 알려진 한계 (beta)
 
 - led-iv의 발진 판정 기준(점 내 표준편차 2%)은 시뮬레이터와 uvc275 경험값 기준. 1936-R을 필터 없이 읽으므로
