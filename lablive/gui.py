@@ -36,7 +36,7 @@ from .profiles import Profile
 NO_PROFILE = "(프로파일 없음)"
 DEFAULTS = {"profile": "", "current_mA": 100.0, "compliance": 12.0, "i_max_mA": None, "vf_guard": None,
             "lambda_nm": None, "tol_pct": 1.0, "window": 60.0, "margin": 0.5, "note": "", "range": "auto",
-            "rsense": False, "pd_rate": 20.0, "k_rate": 2.0, "duration": 0.0}
+            "rsense": False, "pd_rate": 20.0, "pd_filter": "auto", "k_rate": 2.0, "duration": 0.0}
 
 
 def open_path(p):
@@ -209,6 +209,7 @@ class LiveApp:
                           lambda_nm=c["lambda_nm"] or (prof.get("lambda_nm") if prof else None), pm_range=rng,
                           tol=c["tol_pct"] / 100, window_s=c["window"] if not sim else min(c["window"], 5.0),
                           vf_guard=c["vf_guard"] or None, pd_rate=c["pd_rate"], k_rate=c["k_rate"],
+                          digital_filter=None if str(c.get("pd_filter", "auto")) == "auto" else int(c["pd_filter"]),
                           fit_every_s=2.0 if sim else 15.0, fit_min_s=3.0 if sim else 20.0,
                           rsense=c["rsense"], note=c["note"], settle_margin=c["margin"])
 
@@ -342,7 +343,8 @@ class LiveApp:
         self._set_status(txt, color)
         self.info.configure(text=f"LED {self.s.current * 1e3:g} mA (상한 {self.s.i_max * 1e3:g})   "
                                  f"V {st['V']:.3f} / cap {self.s.compliance:g} V   "
-                                 f"guard {self.s.vf_guard or '-'}   1936-R r{st['pd_range']}   "
+                                 f"guard {self.s.vf_guard or '-'}   1936-R r{st['pd_range']} "
+                                 f"{self.s.pd_rate:g} Hz/filter {self.s.digital_filter / 10:g} ms   "
                                  f"{self.s.pm.port} / {self.s.k.port}   →  {self.s.run_dir}")
         if st["state"] == "fault" and not self._fault_shown:
             self._fault_shown = True
@@ -523,7 +525,8 @@ class SettingsWindow(tk.Toplevel):
         ("margin", "SETTLED 여유 margin", "× tol  (0.5 = 예측 최종값 ±tol/2)"),
         ("window", "단기 판정 창", "s"),
         ("range", "1936-R range", "auto 또는 0–7"),
-        ("pd_rate", "1936-R 읽기", "Hz"),
+        ("pd_rate", "1936-R 읽기", "Hz  (판독 간격 = 1/Hz)"),
+        ("pd_filter", "1936-R 디지털 필터", "점, 10 kHz 기준  (auto = 판독 간격에 맞춤: 20 Hz → 500점 = 50 ms)"),
         ("k_rate", "2400 읽기", "Hz"),
         ("duration", "자동 종료", "s  (0 = 수동)"),
     ]
@@ -609,6 +612,14 @@ class SettingsWindow(tk.Toplevel):
         out = {}
         for key, lab, _ in self.FIELDS:
             raw = self.vars[key].get().strip()
+            if key == "pd_filter":
+                if raw.lower() in ("", "auto", "자동"):
+                    out[key] = "auto"
+                elif raw.isdigit() and 1 <= int(raw) <= 10000:
+                    out[key] = int(raw)
+                else:
+                    raise ValueError("1936-R 디지털 필터는 auto 또는 1–10000 (점)")
+                continue
             if key == "range":
                 if raw.lower() in ("", "auto"):
                     out[key] = "auto"
@@ -628,6 +639,10 @@ class SettingsWindow(tk.Toplevel):
             out[key] = v
         if out["lambda_nm"] is not None:
             out["lambda_nm"] = int(out["lambda_nm"])
+        if not 0 < out["pd_rate"] <= 50:
+            raise ValueError("1936-R 읽기는 0–50 Hz (RS-232 왕복 시간 한계)")
+        if not 0 < out["k_rate"] <= 10:
+            raise ValueError("2400 읽기는 0–10 Hz (9600 baud, NPLC 1 기준 한계 약 10 Hz — led-check --speed)")
         if not 0 < out["compliance"] <= 21:
             raise ValueError("전압 상한은 0 < V ≤ 21")
         out["rsense"] = self.rs.get()

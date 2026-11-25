@@ -20,7 +20,7 @@ InstallDirRegKey HKLM "Software\${APP}" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 BrandingText "${APP} ${VERSION}"
-VIProductVersion "0.9.0.5"
+VIProductVersion "0.9.0.6"
 VIAddVersionKey /LANG=1042 "ProductName" "${APP}"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP} 설치"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"

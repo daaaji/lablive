@@ -71,7 +71,7 @@ def compare_check(profile, res):
 class LedSession:
     def __init__(self, pm, k, current, compliance=12.0, *, i_max, lambda_nm=None, pm_range=None,
                  tol=0.01, window_s=60.0, vf_guard=None, pd_rate=20.0, k_rate=2.0,
-                 trip_every=4, stop_on_trip=True, rsense=False, digital_filter=500,
+                 trip_every=4, stop_on_trip=True, rsense=False, digital_filter=None,
                  fit_every_s=15.0, fit_min_s=20.0, run_dir=None, log=print,
                  profile=None, note="", settle_margin=0.5, check_current=1e-3, reset_check=False):
         if i_max is None or not i_max > 0:
@@ -83,7 +83,12 @@ class LedSession:
         self.lambda_nm, self.pm_range, self.tol, self.window_s = lambda_nm, pm_range, tol, window_s
         self.vf_guard, self.pd_rate, self.k_rate = vf_guard, pd_rate, k_rate
         self.trip_every, self.stop_on_trip, self.rsense = trip_every, stop_on_trip, rsense
-        self.digital_filter, self.log = digital_filter, log
+        # 1936-R 디지털 필터 점 수 (10 kHz 기준). None = 판독 간격에 맞춤 (20 Hz → 500점 = 50 ms)
+        if digital_filter is None:
+            digital_filter = int(min(10000, max(1, round(10000.0 / pd_rate))))
+        if not 1 <= int(digital_filter) <= 10000:
+            raise ValueError("1936-R 디지털 필터는 1–10000점")
+        self.digital_filter, self.log = int(digital_filter), log
         tag = f"_{profile.name}" if profile else ""
         self.run_dir = run_dir or os.path.join(
             config.runs_dir(), datetime.now().strftime("%Y%m%d_%H%M%S") + f"_live{tag}_{current * 1e3:g}mA")
@@ -157,7 +162,15 @@ class LedSession:
                     self.profile.update(check={"I_A": chk["I_A"], "V": chk["V"],
                                                "recorded": datetime.now().isoformat(timespec="seconds")})
 
-            self.meta["pm_digital_filter_readback"] = pm.configure_current(self.lambda_nm, self.digital_filter)
+            rb = pm.configure_current(self.lambda_nm, self.digital_filter)
+            self.meta["pm_digital_filter_readback"] = rb
+            self.meta["pm_filter"] = {"points": self.digital_filter, "ms": self.digital_filter / 10.0,
+                                      "read_interval_ms": 1000.0 / self.pd_rate}
+            try:
+                if int(float(rb)) != self.digital_filter:
+                    self.log(f"주의: 1936-R 디지털 필터 확인값 {rb} ≠ 설정 {self.digital_filter}")
+            except (TypeError, ValueError):
+                pass
             pm.set_range(self.pm_range if self.pm_range is not None else 7)
             k.set_current(self.current)
             ok, func, lev = k.verify_current(self.current)
@@ -169,6 +182,8 @@ class LedSession:
             self.t_on = time.perf_counter()
             self.led_on = True
             self.event(f"LED ON {self.current * 1e3:g} mA (cap {self.compliance:g} V)")
+            self.event(f"1936-R read {self.pd_rate:g} Hz, digital filter {self.digital_filter} pts "
+                       f"({self.digital_filter / 10:g} ms)")
 
             if self.pm_range is None:   # range 7에서 크기만 보고 고정 (auto-range는 전환 중 FLT_MAX)
                 probe = [pm.read_A() for _ in range(6)]

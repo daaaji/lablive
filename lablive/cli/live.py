@@ -31,6 +31,8 @@ def build_parser():
     ap.add_argument("--vf-guard", type=float, default=None,
                     help="단자 전압이 이 값 아래로 가면 경고 (기본: 프로파일 값, 없으면 끔). 0 = 끔")
     ap.add_argument("--pd-rate", type=float, default=20.0, help="1936-R 읽기 (Hz)")
+    ap.add_argument("--pd-filter", default="auto",
+                    help="1936-R 디지털 필터 점 수 (10 kHz 기준, 1–10000). auto = 판독 간격에 맞춤 (20 Hz → 500 = 50 ms)")
     ap.add_argument("--k-rate", type=float, default=2.0, help="2400 읽기 (Hz)")
     ap.add_argument("--fit-every", type=float, default=None, help="피팅 주기 (s, 기본 15)")
     ap.add_argument("--fit-min", type=float, default=None, help="첫 피팅까지 최소 데이터 (s, 기본 20)")
@@ -63,6 +65,7 @@ def main(argv=None):
     s = LedSession(pm, k, a.current, led["compliance"], i_max=led["i_max"], lambda_nm=led["lambda_nm"],
                    pm_range=a.range, tol=a.tol, window_s=window, vf_guard=guard or None,
                    pd_rate=a.pd_rate, k_rate=a.k_rate, fit_every_s=fit_every, fit_min_s=fit_min,
+                   digital_filter=None if str(a.pd_filter).lower() == "auto" else int(a.pd_filter),
                    stop_on_trip=not a.no_trip_stop, rsense=a.rsense, profile=prof, note=a.note,
                    settle_margin=a.margin, log=log, reset_check=a.reset_check)
     holder["dir"] = s.run_dir

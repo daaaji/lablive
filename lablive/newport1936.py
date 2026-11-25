@@ -140,6 +140,11 @@ class Newport1936:
         return math.nan, math.nan, self.range, 0
 
     @staticmethod
+    def filter_for(rate_hz):
+        """판독 간격에 맞춘 디지털 이동평균 점 수 (내부 10 kHz 기준): 10000 / Hz, 1–10000."""
+        return int(min(10000, max(1, round(10000.0 / rate_hz))))
+
+    @staticmethod
     def range_for(i_abs, headroom=1.15, fill=0.9):
         """i_abs를 여유(headroom) 두고 담을 수 있는 가장 낮은 range."""
         return next((r for r, fs in enumerate(FS) if i_abs * headroom <= fill * fs), 7)
