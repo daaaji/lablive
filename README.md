@@ -5,6 +5,8 @@ LED마다 프로파일(전류 상한, 전압 상한, 경고 전압, 전류별 �
 
 ## 설치 — 설치 파일 (권장)
 
+설치 파일 받기: [`releases` 브랜치](https://github.com/daaaji/lablive/tree/releases) (파일 열고 Download raw file)
+
 `lablive_Setup_0.9.0b6.exe` 실행 → 다음 → 설치 → 마침. Python 설치 불필요 (64비트 Windows 10/11).
 - 서명 없는 프로그램이라 "Windows의 PC 보호" 창이 뜨면 `추가 정보` → `실행`
 - 설치 위치 `C:\Program Files\lablive` (관리자 권한). 이전 버전 위에 그대로 설치하면 업데이트
