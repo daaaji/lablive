@@ -8,6 +8,10 @@
 - README: 장비 명령 목록, 판독 간격·필터·속도 한계, 트러블슈팅 기록
 - 설치 파일 b6: 빌드용 wine이 동작하지 않아, b5 실행 파일의 PYZ 안 lablive 모듈만 새 소스로 교체해 만듦
   (`packaging/repyz.py`; 새 모듈이 생기거나 의존 패키지가 바뀌면 이 방법은 안 되고 정식 빌드 필요). 파일 속성 버전 표시는 0.9.0.5로 남음
+  - 첫 b6 설치 파일은 실행 시 "Failed to load Python DLL ...\\lablive\\python312.dll": 실행 파일 안 목록에서
+    'pyi-contents-directory _internal' 옵션 항목이 빠져 부트로더가 _internal 대신 exe 옆에서 DLL을 찾음
+    (PyInstaller CArchiveReader가 옵션 항목을 목록에서 빼고 읽는데 그걸로 다시 씀). repyz.py가 원본 목록을 그대로 읽고
+    새 exe의 목록이 원본과 같은지 검사하도록 고침 → lablive_Setup_0.9.0b6-r2.exe
 
 ## 0.9.0b5 — 2026-11-12
 - 2400 "-101 Invalid character" 수정: 포트 자동 탐색이 1936-R을 찾으며 2400 포트에 38400 baud로 *IDN?을 보내면

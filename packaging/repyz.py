@@ -5,7 +5,6 @@
 조건: lablive에 새 모듈이 생기지 않았고, 새 외부 import가 없을 것 (스크립트가 확인). 그 외에는 build_windows.bat로 정식 빌드.
 """
 import importlib.util, marshal, os, struct, sys, zlib
-from PyInstaller.archive.readers import CArchiveReader
 from PyInstaller.archive.writers import CArchiveWriter
 
 src, exe_in, exe_out = sys.argv[1:4]
@@ -14,10 +13,23 @@ data = open(exe_in, "rb").read()
 magic, alen, toc_off, toc_len, pyvers, pylib = COOKIE.unpack(data[-COOKIE.size:])
 pkg_start = len(data) - alen
 pkg = data[pkg_start:]
-ar = CArchiveReader(exe_in)
-entries = []  # (name, off, clen, ulen, cflag, typ)
-for name, (off, clen, ulen, cflag, typ) in ar.toc.items():
-    entries.append((name, off, clen, ulen, cflag, typ))
+
+
+def raw_toc(pkg_bytes, toc_offset, toc_length):
+    """CArchive TOC를 원본 순서·중복 그대로 (CArchiveReader는 'o' 옵션 항목을 toc dict에서 빼므로 쓰지 않음 —
+    'pyi-contents-directory _internal' 옵션이 빠지면 부트로더가 exe 옆에서 python312.dll을 찾다 실패)."""
+    t = pkg_bytes[toc_offset:toc_offset + toc_length]
+    out, i = [], 0
+    while i < len(t):
+        (elen,) = struct.unpack('!I', t[i:i + 4])
+        off, clen, ulen, cflag, typ = struct.unpack('!IIIBc', t[i + 4:i + 18])
+        name = t[i + 18:i + elen].rstrip(b'\0').decode('utf-8')
+        out.append((name, off, clen, ulen, cflag, typ.decode()))
+        i += elen
+    return out
+
+
+entries = raw_toc(pkg, toc_off, toc_len)   # (name, off, clen, ulen, cflag, typ)
 
 def blob(e):
     return pkg[e[1]:e[1] + e[2]]
@@ -118,4 +130,12 @@ for n in replaced:
             bad.add((n, m))
 print("import 확인:", "OK" if not bad else sorted(bad))
 open(exe_out, "wb").write(data[:pkg_start] + bytes(pk))
+# 검증: 새 exe의 TOC가 이름·순서·종류까지 원본과 같은지 (PYZ 크기만 다름)
+nd = open(exe_out, "rb").read()
+m2, al2, to2, tl2, pv2, pl2 = COOKIE.unpack(nd[-COOKIE.size:])
+new_entries = raw_toc(nd[len(nd) - al2:], to2, tl2)
+assert [(e[0], e[5]) for e in new_entries] == [(e[0], e[5]) for e in entries], "TOC 불일치"
+assert (pv2, pl2) == (pyvers, pylib)
+print(f"{os.path.basename(exe_out)}: TOC {len(new_entries)}개 항목 원본과 일치 ("
+      + ", ".join(e[0] for e in new_entries if e[5] == 'o') + ")")
 print(f"{os.path.basename(exe_out)}: 교체 {len(replaced)}개 모듈, PYZ {len(pyz_raw)}→{len(new_pyz)} B, pyvers {pyvers}")
