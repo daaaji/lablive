@@ -29,6 +29,9 @@ def collect(profile, current=None, tols=(0.01, 0.005)):
             continue
         if current is not None and (s.get("current_A") is None or abs(s["current_A"] - current) > 0.02 * current):
             continue
+        if is_pulse_run(d):
+            rows.append({"dir": d, "error": "펄스(셔터) 측정 회차 — 안정도 비교에서 제외 (led-pulses로 분석)"})
+            continue
         rows.append(s)
     ok = [r for r in rows if "error" not in r]
     ok.sort(key=lambda r: r.get("started") or "")
@@ -40,6 +43,28 @@ def collect(profile, current=None, tols=(0.01, 0.005)):
             prev_end = st.timestamp() + r["duration_s"]
             prev_end = datetime.fromtimestamp(prev_end)
     return ok, [r for r in rows if "error" in r]
+
+
+def is_pulse_run(d):
+    """펄스 모드 회차, 또는 b6 이하에서 펄스 모드 없이 잰 셔터 측정 (pd.csv에 열림/닫힘 펄스가 3개 이상)."""
+    import json
+    mp = os.path.join(d, "meta.json")
+    try:
+        with open(mp, encoding="utf-8") as f:
+            args = json.load(f).get("args") or {}
+    except (OSError, ValueError):
+        args = {}
+    if "mode" in args:
+        return args["mode"] == "pulse"
+    try:
+        from .pulses import detect
+        a = np.genfromtxt(os.path.join(d, "pd.csv"), delimiter=",", skip_header=1, usecols=(0, 1))
+        if a.ndim != 2 or len(a) < 50:
+            return False
+        p, _ = detect(a[:, 0], a[:, 1])
+        return sum(x["ok"] for x in p) >= 3
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _label(r):

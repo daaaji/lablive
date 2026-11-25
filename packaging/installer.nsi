@@ -20,7 +20,7 @@ InstallDirRegKey HKLM "Software\${APP}" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 BrandingText "${APP} ${VERSION}"
-VIProductVersion "0.9.0.6"
+VIProductVersion "0.9.0.7"
 VIAddVersionKey /LANG=1042 "ProductName" "${APP}"
 VIAddVersionKey /LANG=1042 "FileDescription" "${APP} 설치"
 VIAddVersionKey /LANG=1042 "FileVersion" "${VERSION}"
@@ -85,6 +85,9 @@ Section "lablive (필수)" SecCore
   FileOpen $0 "$INSTDIR\led-check.bat" w
   FileWrite $0 '@"%~dp0lablive-cli.exe" check %*$\r$\n'
   FileClose $0
+  FileOpen $0 "$INSTDIR\led-pulses.bat" w
+  FileWrite $0 '@"%~dp0lablive-cli.exe" pulses %*$\r$\n'
+  FileClose $0
   FileOpen $0 "$INSTDIR\led-gui.bat" w
   FileWrite $0 '@start "" "%~dp0lablive.exe" %*$\r$\n'
   FileClose $0
@@ -92,7 +95,7 @@ Section "lablive (필수)" SecCore
   FileWrite $0 '@"%~dp0lablive-cli.exe" selftest %*$\r$\n'
   FileClose $0
   FileOpen $0 "$INSTDIR\lablive-shell.bat" w
-  FileWrite $0 '@echo off$\r$\nchcp 65001 >nul$\r$\nset "PATH=%~dp0;%PATH%"$\r$\nset "PYTHONUTF8=1"$\r$\ncd /d "%USERPROFILE%"$\r$\necho lablive ${VERSION}$\r$\necho   commands: led-gui  led-live  led-iv  led-profile  led-check  lablive-selftest   (add -h for help)$\r$\necho   e.g.  led-iv --unknown     led-profile list     led-check --off$\r$\n'
+  FileWrite $0 '@echo off$\r$\nchcp 65001 >nul$\r$\nset "PATH=%~dp0;%PATH%"$\r$\nset "PYTHONUTF8=1"$\r$\ncd /d "%USERPROFILE%"$\r$\necho lablive ${VERSION}$\r$\necho   commands: led-gui  led-live  led-iv  led-profile  led-check  led-pulses  lablive-selftest   (add -h for help)$\r$\necho   e.g.  led-iv --unknown     led-profile list     led-check --off$\r$\n'
   FileClose $0
 
   CreateDirectory "$SMPROGRAMS\${APP}"

@@ -1,12 +1,14 @@
 """LED 측정 창 (tkinter + matplotlib). 실시간 그래프 위에 도구 막대:
 
-  [▶ 시작/■ 정지] [LED 설정] [경로] | 전류 [ ] mA [적용] 단계 [ ] [▲][▼] | [색] [데이터] [PNG] [요약]
+  [▶ 시작/■ 정지] [LED 설정] [경로] [장비] | 전류 [ ] mA [적용] 단계 [ ] [▲][▼] | [고속 캡처] | [색] [데이터] [PNG] [요약]
 
 - LED 설정: 프로파일 선택/값 편집/프로파일 저장. 측정 중에는 실시간 적용 가능한 항목만 (전압 상한, 경고 전압,
            tol, margin, 메모, 전류 상한 낮추기)
 - 경로: 데이터 폴더(home), 회차 저장 폴더 — 기본값 버튼, ~/.lablive.json에 저장
 - 장비: 1936-R / 2400 포트 (기본 '자동' = 매번 *IDN? 탐색), [포트 찾기]로 각 COM 포트에 무엇이 붙어 있는지 확인
 - 전류: 측정 중 바꾸면 그 시각부터 안정도 판정을 새로 시작 (회차 비교에는 첫 전류 구간만)
+- 측정 모드 (LED 설정): 안정화(기본, 피팅으로 최종값·SETTLED 판정) / 펄스(셔터 캘리브레이션 — 피팅 없이 펄스 폭·도달률)
+- 고속 캡처: 측정 중 1936-R 내부 data store로 짧은 간격(0.1 ms 단위) 캡처 → 덤프 → 펄스 분석 (덤프 초당 약 270점)
 - 색: 그래프 요소 색 (~/.lablive.json에 저장)
 - 데이터: 광전류/2400/이벤트 표 (스크롤, 실시간 추가), 다른 CSV 열기
 장비 통신은 전부 작업 스레드에서 (창이 멈추지 않게), 그림 갱신은 Tk 주 스레드에서만.
@@ -36,7 +38,9 @@ from .profiles import Profile
 NO_PROFILE = "(프로파일 없음)"
 DEFAULTS = {"profile": "", "current_mA": 100.0, "compliance": 12.0, "i_max_mA": None, "vf_guard": None,
             "lambda_nm": None, "tol_pct": 1.0, "window": 60.0, "margin": 0.5, "note": "", "range": "auto",
-            "rsense": False, "pd_rate": 20.0, "pd_filter": "auto", "k_rate": 2.0, "duration": 0.0}
+            "rsense": False, "pd_rate": 20.0, "pd_filter": "auto", "k_rate": 2.0, "duration": 0.0,
+            "mode": "settle", "pulse_widths": ""}
+MODES = {"settle": "안정화 (피팅·SETTLED 판정)", "pulse": "펄스 (셔터 캘리브레이션: 폭·도달률)"}
 
 
 def open_path(p):
@@ -49,6 +53,20 @@ def open_path(p):
             subprocess.Popen(["xdg-open", p])
     except Exception as e:  # noqa: BLE001
         messagebox.showerror("열기 실패", str(e))
+
+
+def parse_widths(txt):
+    """'100, 140,200' → [100.0, 140.0, 200.0] (빈 값 → None). 잘못되면 ValueError."""
+    txt = (txt or "").replace(" ", "")
+    if not txt:
+        return None
+    try:
+        w = [float(x) for x in txt.split(",") if x]
+    except ValueError:
+        raise ValueError(f"펄스 공칭 폭은 쉼표로 구분한 ms 숫자 (예: 100,140,200): {txt}") from None
+    if not w or min(w) <= 0:
+        raise ValueError("펄스 공칭 폭은 양수 ms")
+    return w
 
 
 def _f(x):
@@ -135,6 +153,9 @@ class LiveApp:
         ttk.Button(bar, text="▲", width=3, command=lambda: self.step_current(+1)).pack(side="left", padx=(4, 0))
         ttk.Button(bar, text="▼", width=3, command=lambda: self.step_current(-1)).pack(side="left")
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        self.b_cap = ttk.Button(bar, text="고속 캡처", command=self.open_capture)
+        self.b_cap.pack(side="left")
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(bar, text="색", width=4, command=self.open_colors).pack(side="left")
         ttk.Button(bar, text="데이터", command=self.open_data).pack(side="left", padx=(4, 0))
         ttk.Button(bar, text="PNG 저장", command=self.save_png).pack(side="left", padx=(4, 0))
@@ -160,7 +181,8 @@ class LiveApp:
         c = self.cfg
         ax.text(0.5, 0.55, "▶ 시작  →  극성 점검 후 LED ON", ha="center", va="center", fontsize=18, color="#555")
         ax.text(0.5, 0.42, f"프로파일 {c['profile'] or '-'}   |   {c['current_mA']:g} mA   |   전압 상한 {c['compliance']:g} V"
-                f"   |   tol ±{c['tol_pct']:g}%", ha="center", va="center", fontsize=12, color="#777")
+                + (f"   |   tol ±{c['tol_pct']:g}%" if c.get("mode") != "pulse" else
+                   f"   |   펄스 모드, range {c['range']}"), ha="center", va="center", fontsize=12, color="#777")
         ax.text(0.5, 0.33, f"데이터 폴더 {config.home()}", ha="center", va="center", fontsize=10, color="#999")
         self.canvas.draw_idle()
         self._set_status("READY" if not self.sim else "READY (SIMULATOR)", "#8d8d8d")
@@ -180,6 +202,7 @@ class LiveApp:
         else:
             self.b_run.configure(state="disabled" if self.attached else "normal", text="▶ 시작")
         self.b_paths.configure(state="disabled" if (self.running or self.busy or self.attached) else "normal")
+        self.b_cap.configure(state="normal" if (self.running and not self.busy) else "disabled")
         self.b_dev.configure(text=f"장비: {self._port_label()}")
 
     # ---------------- 시작 / 정지 ----------------
@@ -211,7 +234,8 @@ class LiveApp:
                           vf_guard=c["vf_guard"] or None, pd_rate=c["pd_rate"], k_rate=c["k_rate"],
                           digital_filter=None if str(c.get("pd_filter", "auto")) == "auto" else int(c["pd_filter"]),
                           fit_every_s=2.0 if sim else 15.0, fit_min_s=3.0 if sim else 20.0,
-                          rsense=c["rsense"], note=c["note"], settle_margin=c["margin"])
+                          rsense=c["rsense"], note=c["note"], settle_margin=c["margin"],
+                          mode=c.get("mode", "settle"), pulse_widths_ms=parse_widths(c.get("pulse_widths")))
 
     def start(self):
         if self.busy or self.running:
@@ -327,6 +351,9 @@ class LiveApp:
             messagebox.showerror(msg[1], msg[2])
         elif kind == "info":
             self.log(msg[1])
+        elif kind == "capture_done":
+            _, lines, path = msg
+            TextWindow(self.root, "고속 캡처 결과", "\n".join(lines + ["", path]), folder=os.path.dirname(path))
         self._refresh_buttons()
 
     def _update_status(self):
@@ -336,20 +363,43 @@ class LiveApp:
         txt = f"{label}   t {fmt_t(st.get('t_since_on'))}"
         if st.get("n", 0) >= 10:
             txt += f"   I_pd {st['y_now'] * 1e6:.4f} µA"
-        if f:
+        pr = st.get("pulse")
+        if pr and pr.get("pulses"):
+            last = pr["pulses"][-1]
+            txt += (f"   펄스 {len(pr['pulses'])}개 (정상 {sum(p['ok'] for p in pr['pulses'])})   "
+                    f"마지막 폭 {1e3 * last['width_s']:.1f} ms, 도달 {last['reach_pct']:.1f}%")
+        elif f:
             txt += f"   최종값 대비 {f['dev_pct']:+.3f}%"
+        cap = st.get("capture")
+        if cap:
+            txt += (f"   [고속 캡처 {'저장 중' if cap['phase'] == 'capture' else '덤프 중'} "
+                    f"{cap.get('done', 0)}/{cap.get('total', 0)}]")
         if st.get("fault"):
             txt += f"   FAULT: {st['fault']}"
         self._set_status(txt, color)
         self.info.configure(text=f"LED {self.s.current * 1e3:g} mA (상한 {self.s.i_max * 1e3:g})   "
                                  f"V {st['V']:.3f} / cap {self.s.compliance:g} V   "
                                  f"guard {self.s.vf_guard or '-'}   1936-R r{st['pd_range']} "
-                                 f"{self.s.pd_rate:g} Hz/filter {self.s.digital_filter / 10:g} ms   "
+                                 f"{self._rate_text(st)}/filter {self.s.digital_filter / 10:g} ms   "
                                  f"{self.s.pm.port} / {self.s.k.port}   →  {self.s.run_dir}")
         if st["state"] == "fault" and not self._fault_shown:
             self._fault_shown = True
             self.stop()
             messagebox.showwarning("FAULT — LED OFF", f"{st['fault']}\n\nLED는 꺼졌습니다. 기록: {self.s.run_dir}")
+
+    def _rate_text(self, st):
+        """설정 Hz와 실제(최근 50점) 판독 빈도, 공백 수."""
+        txt = f"{self.s.pd_rate:g} Hz"
+        pd = self.s.snapshot_pd()
+        if pd is not None and len(pd) > 20:
+            import numpy as np
+            d = np.diff(pd[-51:, 0])
+            if len(d) and d.mean() > 0:
+                txt += f" (실제 {1 / d.mean():.0f})"
+        g = (st.get("pd_timing") or {}).get("gaps")
+        if g:
+            txt += f" 공백 {g}"
+        return txt
 
     def _after_stop(self):
         s = self.s
@@ -443,6 +493,15 @@ class LiveApp:
 
     def open_colors(self):
         ColorsWindow(self)
+
+    def open_capture(self):
+        if not self.running:
+            messagebox.showinfo("고속 캡처", "측정 중에만 (LED가 켜져 있어야 함)")
+            return
+        if self.s.capture is not None:
+            messagebox.showinfo("고속 캡처", "이미 캡처 중")
+            return
+        CaptureWindow(self)
 
     def open_data(self):
         if self.data_win is not None and self.data_win.winfo_exists():
@@ -562,6 +621,20 @@ class SettingsWindow(tk.Toplevel):
             ttk.Label(fr, text=unit, foreground="#666").grid(row=i, column=2, sticky="w", padx=6)
             self.vars[key] = v
         i += 1
+        ttk.Label(fr, text="측정 모드").grid(row=i, column=0, sticky="w", pady=(6, 1))
+        self.mode = tk.StringVar(value=MODES[c.get("mode", "settle")])
+        ttk.Combobox(fr, textvariable=self.mode, values=list(MODES.values()), width=34,
+                     state="disabled" if run else "readonly").grid(row=i, column=1, columnspan=2, sticky="w",
+                                                                   pady=(6, 1))
+        i += 1
+        ttk.Label(fr, text="펄스 공칭 폭").grid(row=i, column=0, sticky="w")
+        self.pw = tk.StringVar(value=c.get("pulse_widths", ""))
+        ttk.Entry(fr, textvariable=self.pw, width=30).grid(row=i, column=1, columnspan=2, sticky="w")
+        i += 1
+        ttk.Label(fr, text="ms, 쉼표 (예: 100,140,200,300) — 펄스 모드 그룹 이름표·폭 오차용, 비우면 폭으로 자동 묶음.\n"
+                           "펄스 모드는 range를 열림 기준으로: 비우면(auto) 첫 펄스에서 맞추고 프로파일에 기억",
+                  foreground="#666").grid(row=i, column=0, columnspan=3, sticky="w")
+        i += 1
         ttk.Label(fr, text="4-wire (rsense)").grid(row=i, column=0, sticky="w")
         self.rs = tk.BooleanVar(value=bool(c["rsense"]))
         ttk.Checkbutton(fr, variable=self.rs, state="disabled" if run else "normal").grid(row=i, column=1, sticky="w")
@@ -646,6 +719,9 @@ class SettingsWindow(tk.Toplevel):
         if not 0 < out["compliance"] <= 21:
             raise ValueError("전압 상한은 0 < V ≤ 21")
         out["rsense"] = self.rs.get()
+        out["mode"] = next(k for k, v in MODES.items() if v == self.mode.get())
+        parse_widths(self.pw.get())                 # 형식 확인
+        out["pulse_widths"] = self.pw.get().strip()
         out["note"] = self.note.get()
         out["profile"] = "" if self.pvar.get() == NO_PROFILE else self.pvar.get()
         return out
@@ -663,6 +739,10 @@ class SettingsWindow(tk.Toplevel):
                 s.set_tol(new["tol_pct"] / 100, new["margin"])
                 if new["note"] != s.note:
                     s.set_note(new["note"])
+                pw = parse_widths(new["pulse_widths"])
+                if pw != s.pulse_widths_ms:
+                    s.pulse_widths_ms = pw
+                    s._pulse_cache = (None, -1e9)
                 if new["i_max_mA"] and new["i_max_mA"] / 1e3 < s.i_max:
                     if new["i_max_mA"] / 1e3 < s.current:
                         raise ValueError(f"현재 전류 {s.current * 1e3:g} mA보다 낮은 상한 — 전류를 먼저 낮출 것")
@@ -717,6 +797,124 @@ class SettingsWindow(tk.Toplevel):
 
 
 # =====================================================================
+class CaptureWindow(tk.Toplevel):
+    """1936-R data store 고속 캡처. 캡처·덤프 동안 PM:P? 폴링(그래프)은 멈추고, LED와 2400 기록은 계속."""
+    STEPS = ("0.1", "0.2", "0.5", "1", "2", "5", "10")
+    DUMP_PTS_S = 270.0          # 38400 baud에서 PM:DS:GET? 덤프 속도 추정 (실측되면 그 값을 씀)
+
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app, self.s = app, app.s
+        self.title("고속 캡처 (1936-R data store)")
+        self.resizable(False, False)
+        self.transient(app.root)
+        self.cancel = threading.Event()
+        self.worker = None
+        fr = ttk.Frame(self, padding=10)
+        fr.pack(fill="both")
+        self.len_v = tk.StringVar(value="10")
+        self.step_v = tk.StringVar(value="1")
+        self.pw_v = tk.StringVar(value=app.cfg.get("pulse_widths", ""))
+        rows = [("길이", ttk.Entry(fr, textvariable=self.len_v, width=10, justify="right"), "s"),
+                ("간격", ttk.Combobox(fr, textvariable=self.step_v, values=self.STEPS, width=8, justify="right"),
+                 "ms  (장비 내부 10 kHz 기준, 0.1 ms 단위)"),
+                ("펄스 공칭 폭", ttk.Entry(fr, textvariable=self.pw_v, width=30), "ms, 쉼표 (선택)")]
+        for i, (lab, w, unit) in enumerate(rows):
+            ttk.Label(fr, text=lab).grid(row=i, column=0, sticky="w", pady=1)
+            w.grid(row=i, column=1, sticky="w")
+            ttk.Label(fr, text=unit, foreground="#666").grid(row=i, column=2, sticky="w", padx=6)
+        self.est = ttk.Label(fr, text="", foreground="#a05000", justify="left")
+        self.est.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        ttk.Label(fr, text="캡처·덤프 동안 1936-R 폴링(그래프·pd.csv)은 멈춤. LED와 2400 기록은 계속.\n"
+                           "range는 지금 값으로 고정 (과범위면 그 점은 빈 값). 결과: 회차 폴더 ds_시각.csv, _pulses.*",
+                  foreground="#666", justify="left").grid(row=4, column=0, columnspan=3, sticky="w")
+        self.pb = ttk.Progressbar(fr, length=420, mode="determinate")
+        self.pb.grid(row=5, column=0, columnspan=3, sticky="we", pady=(8, 2))
+        self.ph = ttk.Label(fr, text="")
+        self.ph.grid(row=6, column=0, columnspan=3, sticky="w")
+        b = ttk.Frame(self, padding=(10, 0, 10, 10))
+        b.pack(fill="x")
+        self.b_go = ttk.Button(b, text="시작", command=self.go)
+        self.b_go.pack(side="left")
+        self.b_stop = ttk.Button(b, text="캡처 일찍 끝내기", command=self.cancel.set, state="disabled")
+        self.b_stop.pack(side="left", padx=6)
+        ttk.Button(b, text="닫기", command=self.destroy).pack(side="right")
+        for v in (self.len_v, self.step_v):
+            v.trace_add("write", lambda *_: self._estimate())
+        self._estimate()
+
+    def _params(self):
+        L = _f(self.len_v.get())
+        st = _f(self.step_v.get())
+        if not L or L <= 0 or not st or st <= 0:
+            raise ValueError("길이와 간격은 양수")
+        iv = int(round(st * 10))
+        if abs(iv / 10 - st) > 1e-9 or not 1 <= iv <= 10000:
+            raise ValueError("간격은 0.1 ms 단위, 0.1–1000 ms")
+        n = int(round(L * 10000 / iv))
+        return L, iv, n
+
+    def _rate(self):
+        caps = [c for c in self.s.captures if c.get("pts_per_s_dump")]
+        return caps[-1]["pts_per_s_dump"] if caps else self.DUMP_PTS_S
+
+    def _estimate(self):
+        try:
+            L, iv, n = self._params()
+        except ValueError as e:
+            self.est.configure(text=str(e))
+            return
+        lim = self.s.pm.DS_MAX
+        r = self._rate()
+        self.est.configure(text=f"{n:,}점" + (f"  — 최대 {lim:,}점 초과!" if n > lim else "")
+                                + f"   덤프 예상 {n / r / 60:.1f}분 (초당 {r:.0f}점)")
+
+    def go(self):
+        try:
+            L, iv, n = self._params()
+            pw = parse_widths(self.pw_v.get())
+            if n > self.s.pm.DS_MAX:
+                raise ValueError(f"{n}점 > 최대 {self.s.pm.DS_MAX}점 — 길이를 줄이거나 간격을 늘릴 것")
+        except ValueError as e:
+            messagebox.showerror("고속 캡처", str(e), parent=self)
+            return
+        if n / self._rate() > 120 and not messagebox.askyesno(
+                "고속 캡처", f"덤프에 약 {n / self._rate() / 60:.0f}분 걸립니다 (그동안 폴링 멈춤). 진행할까요?", parent=self):
+            return
+        self.b_go.configure(state="disabled")
+        self.b_stop.configure(state="normal")
+        s, q = self.s, self.app.q
+
+        def work():
+            try:
+                res = s.ds_capture(L, iv, nominal_ms=pw, cancel=self.cancel)
+                q.put(("capture_done", res["lines"], res["path"]))
+            except Exception as e:  # noqa: BLE001
+                q.put(("error", "고속 캡처 실패", f"{type(e).__name__}: {e}"))
+        self.worker = threading.Thread(target=work, name="ds-capture", daemon=True)
+        self.worker.start()
+        self.after(300, self._tick)
+
+    def _tick(self):
+        if not self.winfo_exists():
+            return
+        cap = self.s.capture
+        if cap:
+            tot = max(1, cap.get("total") or 1)
+            self.pb.configure(maximum=tot, value=cap.get("done", 0))
+            self.ph.configure(text={"start": "준비", "capture": "장비에 저장 중", "dump": "덤프 중"}.get(cap["phase"], "")
+                              + f"  {cap.get('done', 0):,}/{tot:,}")
+            if cap["phase"] == "dump":
+                self.b_stop.configure(state="disabled")
+        if self.worker and self.worker.is_alive():
+            self.after(300, self._tick)
+        else:
+            self.ph.configure(text="끝")
+            self.b_go.configure(state="normal")
+            self.b_stop.configure(state="disabled")
+            self.cancel.clear()
+
+
 class PathsWindow(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app.root)

@@ -2,7 +2,7 @@
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 chcp 65001 >nul
-echo === lablive 0.9.0b6 install ===
+echo === lablive 0.9.0b7 install ===
 echo folder: %~dp0
 
 set "PY="
@@ -49,8 +49,8 @@ echo chcp 65001 ^>nul
 echo set "PYTHONUTF8=1"
 echo call "%~dp0.venv\Scripts\activate.bat"
 echo cd /d "!HOME_DIR!"
-echo echo lablive 0.9.0b6   data: !HOME_DIR!
-echo echo   led-gui / led-check / led-iv / led-live / led-profile / lablive-selftest   ^(-h for help^)
+echo echo lablive 0.9.0b7   data: !HOME_DIR!
+echo echo   led-gui / led-check / led-iv / led-live / led-profile / led-pulses / lablive-selftest   ^(-h for help^)
 echo cmd /k
 ) > "%~dp0lablive_shell.bat"
 (

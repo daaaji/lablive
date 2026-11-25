@@ -95,7 +95,7 @@ class StabilityTracker:
             if self._halt.is_set():
                 break
             last_free += 1.0
-            if last_free >= self.fit_every_s:
+            if self.fit_every_s and last_free >= self.fit_every_s:      # 0/None = 자유 피팅 안 함 (펄스 모드)
                 last_free = 0.0
                 self.refit()
 
@@ -191,6 +191,8 @@ class StabilityTracker:
                 continue
             b, a = np.polyfit(tc - tc[0], yc, 1)
             r = yc - (a + b * (tc - tc[0]))
+            if yc.mean() == 0:
+                continue
             vals[int(c)] = 100 * r.std() / abs(yc.mean())
         if 0 not in vals:
             return False, math.nan, math.nan

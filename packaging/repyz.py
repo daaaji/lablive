@@ -1,13 +1,17 @@
 """PyInstaller onedir exe의 PYZ 안 lablive.* 모듈만 새 소스로 교체 — Windows/wine 없이 Linux에서 설치본 갱신용.
 
-사용: python3.12 repyz.py <소스 루트(lablive/ 가 있는 폴더)> <기존 exe> <새 exe>
+사용: python3.12 repyz.py <소스 루트(lablive/ 가 있는 폴더)> <기존 exe> <새 exe> [진입 스크립트 폴더]
   (PyInstaller 6.22.3 필요 — 기존 exe를 만든 버전과 같아야 함, Python 3.12 — 번들 파이썬과 바이트코드 버전 같아야 함)
-조건: lablive에 새 모듈이 생기지 않았고, 새 외부 import가 없을 것 (스크립트가 확인). 그 외에는 build_windows.bat로 정식 빌드.
+- PYZ 안 lablive.* 모듈을 새 소스로 교체하고, 소스에만 있는 lablive 모듈(새 파일)은 PYZ에 추가 (b7: pulses, cli.pulses)
+- 진입 스크립트 폴더를 주면 CArchive의 진입 스크립트('s' 항목, 예: app_cli)도 그 폴더의 같은 이름 .py로 교체
+조건: 새 외부 import가 없을 것 (스크립트가 확인 — 번들에 없는 패키지는 이 방법으로 못 넣음).
+      그 외에는 build_windows.bat로 정식 빌드.
 """
 import importlib.util, marshal, os, struct, sys, zlib
 from PyInstaller.archive.writers import CArchiveWriter
 
 src, exe_in, exe_out = sys.argv[1:4]
+script_dir = sys.argv[4] if len(sys.argv) > 4 else None
 COOKIE = struct.Struct('!8sIIII64s')
 data = open(exe_in, "rb").read()
 magic, alen, toc_off, toc_len, pyvers, pylib = COOKIE.unpack(data[-COOKIE.size:])
@@ -57,7 +61,10 @@ for root, _, files in os.walk(os.path.join(src, "lablive")):
 new_mods = set(mods) - names
 missing = {n for n in names if n == "lablive" or n.startswith("lablive.")} - set(mods)
 assert not missing, f"PYZ에 있는데 소스에 없음: {missing}"
-# 이 exe가 원래 안 쓰던 lablive 모듈은 넣지 않음 (분석 결과 그대로)
+# 새 lablive 모듈은 추가 (typecode 0 = 모듈, 1 = 패키지 — PyInstaller 6 pyimod01_archive)
+added = sorted(new_mods)
+for n in added:
+    ptoc.append((n, (1 if mods[n].endswith("__init__.py") else 0, -1, -1)))
 out = bytearray(b'\0' * 17)
 new_toc = []
 replaced = []
@@ -67,6 +74,7 @@ for n, (tc, off, ln) in ptoc:
         co = compile(open(path, encoding="utf-8").read(), mods[n].replace("/", "\\"), "exec", dont_inherit=True, optimize=0)
         b = zlib.compress(marshal.dumps(co), 6)
         replaced.append(n)
+        names.add(n)
     else:
         b = pyz_raw[off:off + ln]
     new_toc.append((n, (tc, len(out), len(b))))
@@ -78,12 +86,19 @@ out[4:8] = bc_magic
 out[8:12] = struct.pack('!i', toc_pos)
 new_pyz = bytes(out)
 
-# ---- CArchive (같은 순서, PYZ만 교체)
+# ---- CArchive (같은 순서, PYZ와 지정한 진입 스크립트만 교체)
 pk = bytearray()
 toc = []
+scripts_replaced = []
 for (name, off, clen, ulen, cflag, typ) in entries:
+    sp = os.path.join(script_dir, name + ".py") if script_dir else None
     if typ == 'z':
         b, ul, cf = new_pyz, len(new_pyz), 0
+    elif typ == 's' and sp and os.path.isfile(sp):
+        co = compile(open(sp, encoding="utf-8").read(), name + ".py", "exec", dont_inherit=True, optimize=0)
+        raw = marshal.dumps(co)
+        b, ul, cf = zlib.compress(raw, 6), len(raw), 1
+        scripts_replaced.append(name)
     else:
         b, ul, cf = blob((name, off, clen)), ulen, cflag
     toc.append((len(pk), len(b), ul, cf, typ, name))
@@ -119,9 +134,11 @@ def imports(co, pkg):
             out |= imports(c, pkg)
     return out
 bad = set()
-for n in replaced:
-    co = compile(open(os.path.join(src, mods[n]), encoding="utf-8").read(), "x", "exec")
-    pkg = n if mods[n].endswith("__init__.py") else n.rsplit(".", 1)[0]
+checks = [(n, os.path.join(src, mods[n]), n if mods[n].endswith("__init__.py") else n.rsplit(".", 1)[0])
+          for n in replaced]
+checks += [(s_, os.path.join(script_dir, s_ + ".py"), "") for s_ in scripts_replaced]
+for n, path, pkg in checks:
+    co = compile(open(path, encoding="utf-8").read(), "x", "exec")
     for m in imports(co, pkg):
         top_ok = any(m == h or m.startswith(h + ".") or h.startswith(m + ".") for h in have)
         if m.startswith("lablive") and m not in have and m.rsplit(".", 1)[0] in have:
@@ -138,4 +155,5 @@ assert [(e[0], e[5]) for e in new_entries] == [(e[0], e[5]) for e in entries], "
 assert (pv2, pl2) == (pyvers, pylib)
 print(f"{os.path.basename(exe_out)}: TOC {len(new_entries)}개 항목 원본과 일치 ("
       + ", ".join(e[0] for e in new_entries if e[5] == 'o') + ")")
-print(f"{os.path.basename(exe_out)}: 교체 {len(replaced)}개 모듈, PYZ {len(pyz_raw)}→{len(new_pyz)} B, pyvers {pyvers}")
+print(f"{os.path.basename(exe_out)}: 교체 {len(replaced) - len(added)}개 + 추가 {len(added)}개 {added} 모듈, "
+      f"진입 스크립트 {scripts_replaced or '그대로'}, PYZ {len(pyz_raw)}→{len(new_pyz)} B, pyvers {pyvers}")

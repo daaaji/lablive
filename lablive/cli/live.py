@@ -5,6 +5,9 @@
   led-live --profile uvc275 --current 0.1 --no-plot --duration 600
   led-live --no-profile --i-max 0.05 --current 0.02          (프로파일 없이, 상한 필수)
   led-live --sim --profile demo --current 0.1                (시뮬레이터)
+  led-live --profile blue --current 0.1 --pulse --range 6 --pd-rate 50 --pulse-widths 100,140,200,300,400,500,700,1000
+                                                             (셔터 캘리브레이션: 피팅 없이 펄스 폭·도달률)
+  led-live ... --pulse --capture 100 --capture-ms 1          (켠 직후 1936-R 내부 data store로 100 s, 1 ms 간격 캡처)
   (창: 도구 막대에서 LED 설정, 실시간 전류 변경, 색, 데이터 표.  설정부터 GUI로 하려면 led-gui)
 
 창 닫기 / q / Ctrl+C → LED OFF 확인, 1936-R 설정 원복
@@ -40,6 +43,14 @@ def build_parser():
     ap.add_argument("--no-plot", action="store_true", help="그래프 없이 콘솔 출력만")
     ap.add_argument("--rsense", action="store_true", help="2400 4-wire")
     ap.add_argument("--no-trip-stop", action="store_true", help="compliance trip에도 LED 유지 (비권장)")
+    ap.add_argument("--pulse", action="store_true",
+                    help="펄스 모드: 셔터 등으로 켜졌다 꺼졌다 하는 빛. 안정도 피팅 없이 펄스 폭·도달률 (pulses.csv)")
+    ap.add_argument("--pulse-widths", default=None,
+                    help="공칭 펄스 폭 목록 ms (예: 100,140,200) — 그룹 이름표와 폭 오차 계산에 씀")
+    ap.add_argument("--capture", type=float, default=0,
+                    help="LED ON 후 1936-R data store로 이 길이(s)만큼 고속 캡처 → 덤프 (초당 약 270점, 폴링은 그동안 멈춤)")
+    ap.add_argument("--capture-ms", type=float, default=1.0, help="캡처 간격 ms (0.1 단위, 기본 1)")
+    ap.add_argument("--capture-after", type=float, default=0.0, help="LED ON 후 캡처 시작까지 (s)")
     ap.add_argument("--reset-check", action="store_true",
                     help="극성 점검 전압이 프로파일 기록과 달라도 진행하고 기록을 갱신 (같은 LED가 확실할 때)")
     return ap
@@ -52,7 +63,7 @@ def main(argv=None):
     prof = led["profile"]
     # 시뮬레이터는 열 시정수가 압축돼 있어 판정 창/피팅도 짧게
     window = a.window or (5.0 if a.sim else 60.0)
-    fit_every = a.fit_every or (2.0 if a.sim else 15.0)
+    fit_every = a.fit_every if a.fit_every is not None else (2.0 if a.sim else 15.0)
     fit_min = a.fit_min or (3.0 if a.sim else 20.0)
     guard = a.vf_guard if a.vf_guard is not None else led["vf_guard"]
     if prof:
@@ -67,11 +78,14 @@ def main(argv=None):
                    pd_rate=a.pd_rate, k_rate=a.k_rate, fit_every_s=fit_every, fit_min_s=fit_min,
                    digital_filter=None if str(a.pd_filter).lower() == "auto" else int(a.pd_filter),
                    stop_on_trip=not a.no_trip_stop, rsense=a.rsense, profile=prof, note=a.note,
-                   settle_margin=a.margin, log=log, reset_check=a.reset_check)
+                   settle_margin=a.margin, log=log, reset_check=a.reset_check,
+                   mode="pulse" if a.pulse else "settle", pulse_widths_ms=parse_widths(a.pulse_widths))
     holder["dir"] = s.run_dir
     plot = None
     try:
         s.start()
+        if a.capture:
+            start_capture_thread(s, a, log)
         if a.no_plot:
             while True:
                 st = s.status()
@@ -103,6 +117,41 @@ def main(argv=None):
     return 1 if s.fault else 0
 
 
+def parse_widths(txt):
+    if not txt:
+        return None
+    try:
+        w = [float(x) for x in str(txt).replace(" ", "").split(",") if x]
+    except ValueError:
+        raise SystemExit(f"--pulse-widths: 숫자 목록(ms)이 아님: {txt}") from None
+    if not w or min(w) <= 0:
+        raise SystemExit("--pulse-widths: 양수 ms 목록")
+    return w
+
+
+def start_capture_thread(s, a, log):
+    import threading
+    iv = int(round(a.capture_ms * 10))
+    n = int(round(a.capture * 10000 / max(iv, 1)))
+    log(f"data store 캡처 예약: {a.capture_after:g} s 후 {a.capture:g} s, {iv / 10:g} ms 간격 = {n}점 "
+        f"(덤프 예상 {n / 270 / 60:.1f}분)")
+
+    def work():
+        if a.capture_after and s._halt.wait(a.capture_after):
+            return
+        last = [0.0]
+
+        def prog(phase, done, total):
+            if time.perf_counter() - last[0] > 10 or done >= total:
+                last[0] = time.perf_counter()
+                log(f"  {'캡처' if phase == 'capture' else '덤프'} {done}/{total}")
+        try:
+            s.ds_capture(a.capture, iv, progress=prog)
+        except Exception as e:  # noqa: BLE001
+            log(f"캡처 실패: {type(e).__name__}: {e}")
+    threading.Thread(target=work, name="ds-capture", daemon=True).start()
+
+
 def report(s, a, prof, log=print):
     m = s.meta
     fs = m.get("final_status") or {}
@@ -121,8 +170,21 @@ def report(s, a, prof, log=print):
         L.append("                    위 최종값/τ는 마지막 구간 기준, 처음 SETTLED와 회차 비교(history)는 첫 구간 기준")
     if m.get("fault"):
         L.append(f"FAULT               {m['fault']}")
+    pt = m.get("pd_timing") or {}
+    if pt.get("median_ms"):
+        L.append(f"1936-R 판독          설정 {pt['set_hz']:g} Hz → 실제 {pt['achieved_hz']:.1f} Hz "
+                 f"(간격 중앙 {pt['median_ms']:.1f} / p95 {pt['p95_ms']:.1f} / 최대 {pt['max_ms']:.0f} ms, "
+                 f"100 ms 넘는 공백 {pt['over_100ms']}개)")
+    if m.get("pulse_summary"):
+        from ..pulses import summary_lines
+        L += [x for x in summary_lines({"info": m["pulse_summary"]["info"], "groups": m["pulse_summary"]["groups"],
+                                        "pulses": []}, "pd.csv") if not x.lstrip().startswith("제외")]
+        L.append("                    → pulses.csv, pulses_groups.csv, pulses.png")
+    for c in m.get("ds_captures") or []:
+        L.append(f"고속 캡처           {c['csv']}: {c['n']}점, {c['interval_ms']:g} ms 간격 "
+                 f"(덤프 {c['dump_s']:.0f} s) → {c['csv'][:-4]}_pulses.*")
     L.append(f"결과                {s.run_dir}")
-    if prof:
+    if prof and s.mode == "settle":
         pf = m.get("prior_fit")
         if pf:
             L.append(f"프로파일 모양 일치   rms {pf['rms_pct']:.3f}% (한계 {pf['rms_limit_pct']:.2f}%) "

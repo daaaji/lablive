@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import math
+import time
 import os
 
 import numpy as np
@@ -97,10 +98,20 @@ def _nelder_mead(f, x0, step=0.5, iters=3000, tol=1e-12):
     return pts[i], vals[i]
 
 
+# 피팅은 측정 중 백그라운드 스레드에서 돈다. 작은 numpy 호출을 수만 번 반복하는 동안 GIL을 거의 놓지 않아
+# 1936-R/2400 샘플러 스레드가 수백 ms–수 s 멈췄다 (11/25 실측: 약 19 s마다 2–5 s 공백, pty 재현으로 확인).
+# 목적함수 YIELD_EVERY번마다 time.sleep(0)으로 GIL을 실제로 넘긴다 (재현 측정: 공백 최대 850 → 26 ms).
+YIELD_EVERY = 25
+
+
 def fit_multiexp(t, y, n, tau_min, tau_max):
     lo, hi = math.log(tau_min), math.log(tau_max)
+    calls = [0]
 
     def obj(x):
+        calls[0] += 1
+        if YIELD_EVERY and calls[0] % YIELD_EVERY == 0:
+            time.sleep(0)
         if np.any(x < lo) or np.any(x > hi):
             return 1e300
         return _solve(t, y, np.exp(np.sort(x)))[1]

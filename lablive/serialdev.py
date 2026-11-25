@@ -45,7 +45,22 @@ class SerialDevice:
         with self.lock:
             self.s.reset_input_buffer()
             self.s.write((cmd + self.term).encode("ascii"))
-            return self.s.read_until(self.eol).decode("ascii", "replace").strip()
+            return self._read_line().decode("ascii", "replace").strip()
+
+    def _read_line(self):
+        """eol까지 읽기. pyserial read_until은 1바이트씩 읽어 바이트마다 GIL을 놓고 다시 잡는다 —
+        다른 스레드(피팅, 그리기)가 바쁘면 그때마다 기다려 응답 하나에 수십–수백 ms가 걸림.
+        첫 바이트를 기다린 뒤 버퍼에 와 있는 만큼 한 번에 읽는다."""
+        buf = bytearray()
+        deadline = time.monotonic() + self.timeout
+        while True:
+            chunk = self.s.read(max(1, self.s.in_waiting))
+            buf += chunk
+            i = buf.find(self.eol)
+            if i >= 0:          # eol 뒤에 온 것(1936-R의 LF 등)은 다음 query의 reset_input_buffer가 버림
+                return bytes(buf[:i + len(self.eol)])
+            if not chunk or time.monotonic() > deadline:
+                return bytes(buf)
 
 
 def list_ports_info():

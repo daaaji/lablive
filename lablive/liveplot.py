@@ -19,6 +19,7 @@ STYLE = {
     "quasi": ("#b7950b", "SHORT-TERM STABLE"),
     "settled": ("#1e8449", "SETTLED"),
     "anomaly": ("#c0392b", "ANOMALY (noise burst)"),
+    "pulse": ("#117a8b", "PULSE MODE"),
     "fault": ("#c0392b", "FAULT - LED OFF"),
     "stopped": ("#555555", "STOPPED - LED OFF"),
 }
@@ -74,7 +75,9 @@ class LivePlot:
                               hspace=0.42, wspace=0.06, left=0.07, right=0.985, top=0.92, bottom=0.07)
         self.ax_i = fig.add_subplot(gs[0, 0])
         self.ax_d = fig.add_subplot(gs[1, 0])
-        self.ax_v = fig.add_subplot(gs[2, 0], sharex=self.ax_i)
+        self.pulse = getattr(session, "mode", "settle") == "pulse"
+        # 펄스 모드는 위 패널이 최근 구간만 보이므로 전압 패널과 x축을 공유하지 않음
+        self.ax_v = fig.add_subplot(gs[2, 0], sharex=None if self.pulse else self.ax_i)
         self.ax_t = fig.add_subplot(gs[:, 1])
         self.ax_t.axis("off")
         tol = 100 * session.tol
@@ -90,6 +93,10 @@ class LivePlot:
         self.ax_i.legend(fontsize=8, loc="upper right")
 
         (self.l_d,) = self.ax_d.plot([], [], lw=0.8, color="C0")
+        (self.l_pw,) = self.ax_d.plot([], [], "o", ms=3.5, color="C0", label="width (ok)")
+        (self.l_pwx,) = self.ax_d.plot([], [], "x", ms=5, color="0.55", label="excluded (gap/over-range)")
+        self.l_pw.set_visible(self.pulse)
+        self.l_pwx.set_visible(self.pulse)
         self.ax_d.axhline(0, color="gray", lw=0.6)
         self.l_tp = self.ax_d.axhline(+tol, ls="--", color="C2", lw=0.9)
         self.l_tm = self.ax_d.axhline(-tol, ls="--", color="C2", lw=0.9)
@@ -148,8 +155,9 @@ class LivePlot:
         o = st.get("seg_t0") or 0.0
         segs = st.get("segments") or []
         self.title.set_text(f"LED {s.current * 1e3:g} mA" + (f" (start {segs[0]['from_A'] * 1e3:g})" if segs else "")
-                            + f"  |  cap {s.compliance:g} V  |  tol ±{tol:g}%  |  window {s.window_s:g} s  |  "
-                            f"{os.path.basename(s.run_dir)}")
+                            + f"  |  cap {s.compliance:g} V  |  "
+                            + ("PULSE mode" if self.pulse else f"tol ±{tol:g}%  |  window {s.window_s:g} s")
+                            + f"  |  {os.path.basename(s.run_dir)}")
         if len(segs) > self._nseg:                   # 전류 변경 시각 표시
             self._seg_lines = getattr(self, "_seg_lines", [])
             for sg in segs[self._nseg:]:
@@ -161,7 +169,9 @@ class LivePlot:
         self.l_guard.set_visible(bool(s.vf_guard))
         if s.vf_guard:
             self.l_guard.set_ydata([s.vf_guard] * 2)
-        if len(t) >= 2:
+        if self.pulse and len(t) >= 2:
+            self._update_pulse(st, t, y)
+        elif len(t) >= 2:
             ref = fit["y_inf"] if fit else (st["window"]["mean"] if "window" in st else y[-1])
             self.l_i.set_data(_dec(t, self.N), _dec(y, self.N) * 1e6)
             model = s.tracker.model()
@@ -231,6 +241,75 @@ class LivePlot:
                 self.plt.close(self.fig)
         return ()
 
+    PULSE_VIEW_S = 30.0
+
+    def _update_pulse(self, st, t, y):
+        """펄스 모드: 위 = 최근 30 s 원자료(솎지 않음 — 펄스가 사라지지 않게), 가운데 = 펄스 폭 vs 시각."""
+        if not getattr(self, "_pulse_axes_set", False):
+            self._pulse_axes_set = True
+            self.l_fit.set_visible(False)
+            self.l_inf.set_visible(False)
+            self.l_tp.set_visible(False)
+            self.l_tm.set_visible(False)
+            self.l_d.set_visible(False)
+            self.ax_i.set_title(f"photocurrent, last {self.PULSE_VIEW_S:g} s (all samples)", fontsize=9.5)
+            self.ax_i.legend([self.l_i], ["I_pd"], fontsize=8, loc="upper right")
+            self.ax_d.set_ylabel("pulse width (ms)")
+            self.ax_d.legend(fontsize=7.5, loc="upper left")
+        lo = max(0.0, t[-1] - self.PULSE_VIEW_S)
+        sel = t >= lo
+        self.l_i.set_data(t[sel], y[sel] * 1e6)
+        self.ax_i.set_xlim(lo, max(lo + 1.0, t[-1] + 0.3))
+        ys = y[sel] * 1e6
+        pad = 0.05 * ((ys.max() - ys.min()) or abs(ys.max()) or 1)
+        self.ax_i.set_ylim(ys.min() - pad, ys.max() + pad)
+        res = st.get("pulse") or {}
+        P = res.get("pulses") or []
+        ok = [p for p in P if p["ok"]]
+        bad = [p for p in P if not p["ok"]]
+        self.l_pw.set_data([p["t_rise"] for p in ok], [1e3 * p["width_s"] for p in ok])
+        self.l_pwx.set_data([p["t_rise"] for p in bad], [1e3 * p["width_s"] for p in bad])
+        self.ax_d.set_xlim(0, max(10.0, t[-1] * 1.02))
+        self.ax_v.set_xlim(0, max(10.0, t[-1] * 1.02))
+        if P:
+            w = np.array([1e3 * p["width_s"] for p in P])
+            self.ax_d.set_ylim(0, w.max() * 1.15 + 5)
+            self.ax_d.set_title(f"pulse width (50% to 50%), {len(ok)} ok / {len(P)} detected", fontsize=9.5)
+        else:
+            self.ax_d.set_title("pulse width - waiting for pulses", fontsize=9.5)
+
+    def _pulse_lines(self, st):
+        L = []
+        res = st.get("pulse") or {}
+        info = res.get("info") or {}
+        pt = st.get("pd_timing") or {}
+        if pt.get("rtt_ms"):
+            L.append(f"1936 RTT {pt['rtt_ms']:.1f} ms, gaps {pt.get('gaps', 0)}"
+                     + (f" (max {pt['gap_max_ms']:.0f} ms)" if pt.get("gaps") else ""))
+        if info.get("error"):
+            return L + ["", f"-- pulses: {info['error']}"]
+        if not res:
+            return L + ["", "-- pulses: collecting"]
+        L += ["", f"-- pulses  dark {info['dark'] * 1e6:.4g}  open {info['open'] * 1e6:.5g} uA",
+              f"edge ramp {1e3 * info.get('ramp_s', math.nan):.1f} ms"
+              + (" (measured)" if math.isfinite(info.get("ramp_s_measured", math.nan)) else " (= filter)")]
+        o = info.get("open_ref") or {}
+        if o.get("from_pulses", 0) >= 3:
+            L.append(f"open level drift {o['drift_pct_per_min']:+.3f} %/min")
+        L.append(" nom ms   ok/n   width ms       reach %")
+        for g in res.get("groups", [])[-9:]:
+            L.append(f"{g['nominal_ms']:7.4g} {g['n_ok']:3d}/{g['n_all']:<3d} "
+                     f"{g['width_ms_mean']:7.1f}±{g['width_ms_sd']:4.1f}  {g['reach_pct_mean']:7.2f}")
+        we = info.get("width_error_ms")
+        if we and math.isfinite(we.get("sem", math.nan)):
+            L.append(f"vs nominal {we['mean']:+.1f} ± {we['sem']:.1f} ms (n={we['n']})")
+        P = res.get("pulses") or []
+        if P:
+            p = P[-1]
+            L.append(f"last: {1e3 * p['width_s']:.1f} ms, reach {p['reach_pct']:.2f}%"
+                     + ("" if p["ok"] else f"  [{p['why'][:20]}]"))
+        return L
+
     def _lines(self, st):
         tol = st["tol_pct"]
         L = []
@@ -244,8 +323,19 @@ class LivePlot:
             sg = st["segments"]
             L.append(f"I changed x{len(sg)}, last at {fmt_t(sg[-1]['t_s'])}")
             L.append("  (tracking restarted, no profile curve)")
-        if st.get("last_state"):
+        if st.get("last_state") and not self.pulse:
             L.append(f"last state before stop: {st['last_state'].upper()}")
+        cap = st.get("capture")
+        if cap:
+            L.append(f"DS capture: {cap['phase']} {cap.get('done', 0)}/{cap.get('total', 0)}")
+        if self.pulse:
+            L += self._pulse_lines(st)
+            if st.get("fault"):
+                L += ["", f"FAULT: {st['fault']}"]
+            if st.get("events"):
+                L += ["", "-- events"] + [f"{fmt_t(t):>7s} {m[:40]}" for t, m in st["events"][-5:]]
+            L += ["", "[s] save  (click plot first)" if not self.plt else "[q] stop+LED OFF  [s] save"]
+            return L
         if "window" in st:
             w = st["window"]
             L += ["", f"-- window {st['window_s']:g} s {'' if w['full'] else '(filling)'}",

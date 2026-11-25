@@ -17,7 +17,7 @@
   sim           장비 없는 시뮬레이터 (--sim)
   cli/          명령: led-live, led-iv, led-profile, led-check, lablive-selftest
 """
-__version__ = "0.9.0b6"
+__version__ = "0.9.0b7"
 
 from .keithley2400 import Keithley2400
 from .led_session import LedSession, fmt_t, status_line

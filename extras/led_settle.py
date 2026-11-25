@@ -1,5 +1,5 @@
 r"""
-[extras — lablive 0.9.0b6 패키지 밖의 단독 스크립트. uvc275 전용 기본값(I ≤ 0.25 A, 극성 점검 기준)이 코드에 고정됨.
+[extras — lablive 0.9.0b7 패키지 밖의 단독 스크립트. uvc275 전용 기본값(I ≤ 0.25 A, 극성 점검 기준)이 코드에 고정됨.
  lablive_shell 창에서  python <설치폴더>\extras\led_settle.py --current 0.1  (결과는 현재 폴더의 runs\)]
 
 led_settle.py — 2400 정전류 LED 구동 + 1936-R 광전류로 settling 측정

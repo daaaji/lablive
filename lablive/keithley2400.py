@@ -60,7 +60,7 @@ class Keithley2400:
         with self.dev.lock:
             self.dev.s.reset_input_buffer()
             self.dev.s.write((cmd + ";*OPC?" + self.dev.term).encode("ascii"))
-            ok = self.dev.s.read_until(self.dev.eol).decode("ascii", "replace").strip().endswith("1")
+            ok = self.dev._read_line().decode("ascii", "replace").strip().endswith("1")
         if pause:
             time.sleep(pause)
         return ok

@@ -27,7 +27,48 @@ P["i_srh"] = None
 PM_PORT, K_PORT = "SIM-PM", "SIM-K"
 ST = {}
 HEAT = {}
+DS = {"t0": None, "vals": [], "n": 0, "iv": 1}
 _lock = threading.Lock()
+
+
+# 환경변수 LABLIVE_SIM_SHUTTER="100,140,200:8:800:5" → 셔터 펄스 흉내 (폭 ms 목록 : 반복 : 사이 어둠 ms : LED ON 후 시작 s)
+#   각 폭을 반복 횟수만큼 (열림 폭 → 어둠) 하고, 폭이 바뀔 때 2 s 쉼. 셔터 전이 3 ms, 닫힘 누설 0.08%.
+#   닫힘 시간이 폭보다 OPEN_EXTRA_MS 길게 (11/25 실측의 +12 ms 흉내).
+SHUTTER = {"plan": None, "edge_s": 0.003, "leak": 8e-4, "extra_s": 0.012}
+
+
+def shutter_plan(spec):
+    w, rep, dark, start = (spec.split(":") + ["8", "800", "5"])[:4] if ":" in spec else (spec, "8", "800", "5")
+    t = float(start)
+    plan = []
+    for x in w.split(","):
+        for _ in range(int(rep)):
+            plan.append((t, t + float(x) / 1e3 + SHUTTER["extra_s"]))
+            t += float(x) / 1e3 + float(dark) / 1e3
+        t += 2.0
+    return plan
+
+
+def transmission(t):
+    """셔터 투과율 0(+누설)…1 — 열림/닫힘 모두 edge_s 동안 직선."""
+    plan = SHUTTER["plan"]
+    if plan is None:
+        return 1.0
+    e, lk = SHUTTER["edge_s"], SHUTTER["leak"]
+    for a, b in plan:
+        if a <= t < b + e:
+            up = min(1.0, (t - a) / e)
+            down = 1.0 if t < b else max(0.0, 1 - (t - b) / e)
+            return lk + (1 - lk) * min(up, down)
+    return lk
+
+
+def transmission_avg(t, win):
+    """1936-R 디지털 이동평균(win s) 흉내."""
+    if SHUTTER["plan"] is None or win <= 0:
+        return transmission(t)
+    n = max(2, min(40, int(win / 5e-4)))
+    return sum(transmission(t - win * (k + 0.5) / n) for k in range(n)) / n
 
 
 def use(kind):
@@ -98,10 +139,14 @@ def operating_point():
     return v, i, False
 
 
-def light(filtered=True):
+def light(filtered=True, now=None, win=0.0):
     dark = P["dark"] * (1 + random.gauss(0, 0.2))
     if not ST["out"]:
         return dark
+    sh = 1.0
+    if SHUTTER["plan"] is not None:
+        now = now or time.perf_counter()
+        sh = transmission_avg(now - ST["t_on"], win)
     v, i, _ = operating_point()
     c = comps()
     a1, a2 = P["amp"]
@@ -112,7 +157,7 @@ def light(filtered=True):
         y *= i / (i + P["i_srh"])
     if v < P["v_osc"]:                          # 1.4 kHz 이완 발진: 50 ms 필터 후 ±1.5%, 필터 없으면 ±60%
         y *= 1 + random.uniform(-1, 1) * (0.015 if filtered else 0.6)
-    return y + dark
+    return y * sh + dark
 
 
 class FakeSerial:
@@ -126,7 +171,7 @@ class FakeSerial:
         self.timeout = kw.get("timeout", 1)
         self.reg = {"PM:MODE?": "0", "PM:UNITs?": "3", "PM:Lambda?": "275", "PM:AUTO?": "1", "PM:RANge?": "0",
                     "PM:FILTer?": "3", "PM:ANALOGFILTER?": "4", "PM:DIGITALFILTER?": "10000",
-                    "PM:DS:INTerval?": "1"} if self.kind == "pm" else {}
+                    "PM:DS:INTerval?": "1", "PM:DS:SIZE?": "1000"} if self.kind == "pm" else {}
 
     def reset_input_buffer(self):
         self.buf.clear()
@@ -140,6 +185,11 @@ class FakeSerial:
     @property
     def in_waiting(self):
         return len(self.buf)
+
+    def read(self, n=1):
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
 
     def read_until(self, eol=b"\n"):
         i = self.buf.find(eol)
@@ -185,12 +235,26 @@ class FakeSerial:
         if c == "ERRSTR?":
             return self.resp("0,No Error")
         if c == "PM:P?":
-            r = int(self.reg["PM:RANge?"])
-            v = light(self.reg["PM:FILTer?"] in ("2", "3") and int(self.reg["PM:DIGITALFILTER?"]) >= 100)
-            if abs(v) > FS[r]:
-                return self.resp("3.402823E+38")
-            lsb = FS[r] / 32768
-            return self.resp(f"{round(v / lsb) * lsb:.6E}")
+            return self.resp(self._value(time.perf_counter()))
+        if c == "PM:DS:ENable 1":
+            DS.update(t0=time.perf_counter(), n=int(self.reg.get("PM:DS:SIZE?", "1000")),
+                      iv=int(self.reg["PM:DS:INTerval?"]), vals=[])
+            return
+        if c == "PM:DS:ENable 0":
+            self._ds_fill()
+            DS["t0"] = None
+            return
+        if c == "PM:DS:CLear":
+            DS.update(t0=None, vals=[])
+            return
+        if c == "PM:DS:Count?":
+            self._ds_fill()
+            return self.resp(str(len(DS["vals"])))
+        if c.startswith("PM:DS:GET? "):
+            a, b = (int(x) for x in c.split()[1].split("-"))
+            body = "\r\n".join(DS["vals"][a - 1:b])
+            self.buf += ("Responsivity: 9.800000E-02\r\nEnd of Header\r\n" + body + "\r\nEnd of Data\r\n").encode()
+            return
         if c in self.reg:
             return self.resp(self.reg[c])
         if " " in c:
@@ -199,6 +263,27 @@ class FakeSerial:
                 self.reg[key + "?"] = val
             if key == "PM:FILTer":            # 실측 버릇
                 self.reg["PM:DIGITALFILTER?"] = "100"
+            if key == "PM:DS:SIZE":
+                self.reg["PM:DS:SIZE?"] = str(min(250000, max(1, int(val))))
+
+    def _value(self, now):
+        r = int(self.reg["PM:RANge?"])
+        filt = self.reg["PM:FILTer?"] in ("2", "3")
+        win = int(self.reg["PM:DIGITALFILTER?"]) * 1e-4 if filt else 0.0
+        v = light(filt and win >= 0.01, now=now, win=win)
+        if abs(v) > FS[r]:
+            return "3.402823E+38"
+        lsb = FS[r] / 32768
+        return f"{round(v / lsb) * lsb:.6E}"
+
+    def _ds_fill(self):
+        """data store: ENable 1 이후 지난 시간만큼 (interval × 0.1 ms 간격) 값을 채움."""
+        if DS.get("t0") is None:
+            return
+        dt = DS["iv"] * 1e-4
+        upto = min(DS["n"], int((time.perf_counter() - DS["t0"]) / dt))
+        while len(DS["vals"]) < upto:
+            DS["vals"].append(self._value(DS["t0"] + len(DS["vals"]) * dt))
 
     def _k(self, c):
         if c == "*IDN?":
@@ -251,6 +336,8 @@ def install():
     from serial.tools import list_ports
     import os
     use(os.environ.get("LABLIVE_SIM_LED", "module"))
+    sp = os.environ.get("LABLIVE_SIM_SHUTTER")
+    SHUTTER["plan"] = shutter_plan(sp) if sp else None
     serial.Serial = FakeSerial
     # 2400을 앞 번호로 (랩 PC처럼): 1936-R 탐색이 2400 포트에 38400 baud로 *IDN?을 보내는 경우를 재현
     list_ports.comports = lambda: [types.SimpleNamespace(device=K_PORT, description="SIM 2400"),

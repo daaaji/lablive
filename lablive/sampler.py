@@ -11,14 +11,19 @@ import numpy as np
 
 
 class Sampler(threading.Thread):
-    def __init__(self, name, read_fn, period_s, clock, columns, csv_path=None, on_sample=None):
+    def __init__(self, name, read_fn, period_s, clock, columns, csv_path=None, on_sample=None, stamp="after"):
         """read_fn() -> 값 튜플 (None이면 이번 회차 건너뜀)
         clock() -> 타임스탬프 (예: LED ON 기준 경과 s)
-        on_sample(row) -> 행마다 호출 (row = (t, *values))"""
+        on_sample(row) -> 행마다 호출 (row = (t, *values))
+        stamp: "after" = 응답을 받은 뒤 clock(), "fn" = read_fn이 (t, *값)으로 시각을 직접 돌려줌.
+          1936-R은 명령을 받는 순간의 값을 돌려주므로 명령을 보내기 직전 시각(포트 잠금 안에서 잰 것)이
+          실제 측정 시각에 가깝고 흔들림이 적다 ("after"에는 응답 전송 + 다른 스레드가 GIL을 쥔 동안
+          기다린 시간이 섞임)."""
         super().__init__(name=name, daemon=True)
         self.read_fn, self.period_s, self.clock = read_fn, period_s, clock
         self.columns = ("t_s",) + tuple(columns)
         self.csv_path, self.on_sample = csv_path, on_sample
+        self.stamp_fn = stamp == "fn"
         self._rows = []
         self._lock = threading.Lock()
         self._halt = threading.Event()   # Thread._stop과 이름이 겹치지 않게
@@ -40,7 +45,7 @@ class Sampler(threading.Thread):
                     self.error = e
                     break
                 if vals is not None:
-                    row = (self.clock(),) + tuple(vals)
+                    row = tuple(vals) if self.stamp_fn else (self.clock(),) + tuple(vals)
                     with self._lock:
                         self._rows.append(row)
                     if self.on_sample:

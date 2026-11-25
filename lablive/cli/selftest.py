@@ -5,7 +5,8 @@
 
 점검: 패키지/버전, 그래프 창(tkinter), 포트 자동 탐색, 프로파일, I-V 스윕(발진 구간 검출),
       냉간 live 측정(SETTLED, OFF 확인, 1936-R 원복), 기준 모델 등록, 데워진 재시작 감지,
-      compliance trip → FAULT/OFF, 다른 LED(점검 전압 불일치) 차단, 전류 상한, 회차 비교 그림
+      compliance trip → FAULT/OFF, 다른 LED(점검 전압 불일치) 차단, 전류 상한, 회차 비교 그림,
+      펄스 모드(셔터 흉내) + data store 고속 캡처 + led-pulses
 """
 import argparse
 import glob
@@ -240,8 +241,8 @@ def main(argv=None):
             if not pump(lambda: app.running and app.plot is not None, 15):
                 return False, f"시작 안 됨 {msgs}"
             pump(lambda: False, 4)
-            for W in (gui.SettingsWindow, gui.ColorsWindow, gui.PathsWindow, gui.DataWindow):
-                W(app).destroy() if W is not gui.DataWindow else None
+            for W in (gui.SettingsWindow, gui.ColorsWindow, gui.PathsWindow, gui.CaptureWindow):
+                W(app).destroy()
             dw = gui.DataWindow(app)
             app.apply_colors({"I_pd": "#000000"})
             app.cur_var.set("120")
@@ -263,6 +264,35 @@ def main(argv=None):
             except Exception:  # noqa: BLE001
                 pass
     check("측정 창 (led-gui: 포트 찾기/시작/전류 변경/표/색/정지)", gui_smoke)
+
+    def pulse_mode():
+        """셔터 펄스 흉내(폭 +12 ms) → 펄스 모드 실시간 분석 + data store 캡처 + led-pulses 재분석."""
+        from ..cli import pulses as cpulses
+        sim.SHUTTER["plan"] = sim.shutter_plan("100,200:4:800:2")
+        try:
+            pm, k, s = session(current=0.1, compliance=12.0, profile=Profile.load("t"), pd_rate=50,
+                               mode="pulse", pulse_widths_ms=[100, 200])
+            try:
+                s.start()
+                time.sleep(9.0)
+                cap = s.ds_capture(2.0, 10)
+                time.sleep(1.0)
+            finally:
+                s.stop()
+                pm.close()
+                k.close()
+        finally:
+            sim.SHUTTER["plan"] = None
+        g = (s.meta.get("pulse_summary") or {}).get("groups") or []
+        we = (s.meta["pulse_summary"]["info"].get("width_error_ms") or {}) if g else {}
+        files = all(os.path.exists(os.path.join(s.run_dir, f)) for f in ("pulses.csv", "pulses_groups.csv", "pulses.png"))
+        rc = cpulses.main([s.run_dir, "--widths", "100,200", "--home", home])
+        ok = (files and rc == 0 and len(g) == 2 and sum(x["n_ok"] for x in g) >= 5
+              and abs(we.get("mean", 99) - 12) < 4 and cap["n"] == 2000 and "pd_timing" in s.meta
+              and s.meta["pm_filter"]["auto"] and not s.tracker._fit)
+        return ok, (f"정상 펄스 {sum(x['n_ok'] for x in g)}개, 폭 오차 {we.get('mean', float('nan')):+.1f} ms "
+                    f"(sim +12), 캡처 {cap['n']}점, 피팅 안 함")
+    check("펄스 모드 + 고속 캡처 + led-pulses", pulse_mode)
 
     def hist():
         cprof.main(["--home", home, "--sim", "history", "t"])

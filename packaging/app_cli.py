@@ -3,15 +3,16 @@ import multiprocessing
 import sys
 
 from lablive import __version__
-from lablive.cli import check, gui, iv, live, profile, selftest
+from lablive.cli import check, gui, iv, live, profile, pulses, selftest
 
-CMDS = {"live": live, "iv": iv, "profile": profile, "check": check, "selftest": selftest, "gui": gui}
+CMDS = {"live": live, "iv": iv, "profile": profile, "check": check, "pulses": pulses, "selftest": selftest,
+        "gui": gui}
 
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
         print(f"lablive {__version__}\n사용: lablive-cli <{'|'.join(CMDS)}> [옵션]   (각 명령 -h)\n"
-              "  설치 폴더의 led-live.bat, led-iv.bat, led-profile.bat, led-check.bat, lablive-selftest.bat 도 같은 것")
+              "  설치 폴더의 led-live.bat, led-iv.bat, led-profile.bat, led-check.bat, led-pulses.bat, lablive-selftest.bat 도 같은 것")
         return 2
     cmd = sys.argv.pop(1)
     sys.argv[0] = f"led-{cmd}" if cmd != "selftest" else "lablive-selftest"

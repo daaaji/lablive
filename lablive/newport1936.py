@@ -19,6 +19,11 @@ STATE_QUERIES = ("PM:MODE?", "PM:UNITs?", "PM:Lambda?", "PM:AUTO?", "PM:RANge?",
                  "PM:FILTer?", "PM:ANALOGFILTER?", "PM:DIGITALFILTER?", "PM:DS:INTerval?")
 
 
+def _int(txt):
+    m = _NUM.search(txt or "")
+    return int(float(m.group())) if m else None
+
+
 def echo_off(dev):
     _echo_off(dev)
 
@@ -112,6 +117,78 @@ class Newport1936:
             return math.nan
         v = float(m.group())
         return math.nan if abs(v) >= OVER else v
+
+    def read_A_at(self, clock):
+        """(명령 직전 시각, 광전류 A). 시각은 포트 잠금 안에서 재므로 다른 스레드가 포트를 쓰는 동안의 대기가 안 섞임."""
+        with self.dev.lock:
+            t = clock()
+            return t, self.read_A()
+
+    def round_trip(self, n=12):
+        """PM:P? 왕복 시간 (s) 중앙값과 전체 목록. 판독 간격 하한 = 이 값 (요청 Hz가 더 빠르면 못 따라감)."""
+        import time
+        dts = []
+        for _ in range(n):
+            t0 = time.perf_counter()
+            self.read_A()
+            dts.append(time.perf_counter() - t0)
+        dts.sort()
+        return dts[len(dts) // 2], dts
+
+    def set_digital_filter(self, points):
+        """디지털 이동평균 크기만 바꿈 (PM:FILTer는 건드리지 않음 — 그 명령이 크기를 100으로 되돌리므로)."""
+        self.dev.write(f"PM:DIGITALFILTER {int(points)}", 0.05)
+        return self.dev.query("PM:DIGITALFILTER?")
+
+    # ---- data store (장비 내부 10 kHz 버퍼) ----
+    DS_MAX = 250000          # 1936-R 사용설명서의 data store 최대 점 수. 실제 값은 SIZE? 확인값을 씀
+
+    def ds_start(self, n, interval):
+        """n점, interval×0.1 ms 간격으로 저장 시작 (가득 차면 정지). 반환: (확인된 SIZE, 확인된 INTerval)."""
+        w = self.dev.write
+        w("PM:DS:ENable 0", 0.05)
+        w("PM:DS:CLear", 0.1)
+        w("PM:DS:BUFfer 0", 0.05)
+        w(f"PM:DS:INTerval {int(interval)}", 0.05)
+        w(f"PM:DS:SIZE {int(n)}", 0.2)
+        size = _int(self.dev.query("PM:DS:SIZE?"))
+        iv = _int(self.dev.query("PM:DS:INTerval?"))
+        w("PM:DS:ENable 1", 0)
+        return size, iv
+
+    def ds_count(self):
+        return _int(self.dev.query("PM:DS:Count?"))
+
+    def ds_stop(self):
+        self.dev.write("PM:DS:ENable 0", 0.05)
+
+    def ds_get(self, a, b, timeout=60.0):
+        """a–b번 점 (1부터). 응답 = 헤더(Responsivity 등) / End of Header / 값들 / End of Data.
+        과범위 값(FLT_MAX)은 NaN. 반환: 값 목록 (개수가 b−a+1과 다를 수 있음 — 호출한 쪽에서 확인)."""
+        import time
+        with self.dev.lock:
+            s = self.dev.s
+            s.reset_input_buffer()
+            s.write((f"PM:DS:GET? {a}-{b}" + self.dev.term).encode("ascii"))
+            buf = bytearray()
+            t_end = time.monotonic() + timeout
+            while time.monotonic() < t_end:
+                chunk = s.read(max(1, s.in_waiting))
+                if chunk:
+                    buf += chunk
+                    if b"End of Data" in buf:
+                        time.sleep(0.02)
+                        buf += s.read(s.in_waiting or 0) if s.in_waiting else b""
+                        break
+                elif b"End of Data" in buf:
+                    break
+        txt = buf.decode("ascii", "replace")
+        body = txt.split("End of Header", 1)[-1].split("End of Data", 1)[0] if "End of Header" in txt else ""
+        out = []
+        for m in _NUM.finditer(body):
+            v = float(m.group())
+            out.append(math.nan if abs(v) >= OVER else v)
+        return out
 
     def read_stats(self, n=5, period=0.06, autorange=True, low=0.03):
         """n번 읽어 (평균, 표준편차, range, 유효 개수). autorange: 과범위면 올리고, FS의 low 미만이면 내려 다시 읽음.
